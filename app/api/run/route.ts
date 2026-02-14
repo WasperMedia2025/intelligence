@@ -1,73 +1,51 @@
 import { NextResponse } from "next/server";
 
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
-
 export async function GET(req: Request) {
+  const APIFY_TOKEN = process.env.APIFY_TOKEN;
+
   try {
+    if (!APIFY_TOKEN) {
+      return NextResponse.json({ error: "Missing APIFY_TOKEN" }, { status: 500 });
+    }
+
     const { searchParams } = new URL(req.url);
     const source = searchParams.get("source");
     const q = searchParams.get("q");
 
     if (!source || !q) {
-      return NextResponse.json(
-        { error: "Missing source or query" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing params" }, { status: 400 });
     }
-
-    if (!APIFY_TOKEN) {
-      return NextResponse.json(
-        { error: "Missing APIFY_TOKEN env variable" },
-        { status: 500 }
-      );
-    }
-
-    // ---- MAP SOURCE → ACTOR ----
 
     let actorId = "";
 
-    if (source === "google-maps") {
-      actorId = "compass/crawler-google-places";
+    switch (source) {
+      case "google-maps":
+        actorId = "compass/crawler-google-places";
+        break;
+      case "trustpilot":
+        actorId = "epctex/trustpilot-scraper";
+        break;
+      case "reddit":
+        actorId = "trudax/reddit-scraper";
+        break;
+      case "quora":
+        actorId = "cyberfly/quora-scraper";
+        break;
+      case "trends":
+        actorId = "easyapi/google-trends";
+        break;
+      default:
+        return NextResponse.json({ error: "Invalid source" }, { status: 400 });
     }
 
-    if (source === "trustpilot") {
-      actorId = "epctex/trustpilot-scraper";
-    }
-
-    if (source === "reddit") {
-      actorId = "trudax/reddit-scraper";
-    }
-
-    if (source === "quora") {
-      actorId = "cyberfly/quora-scraper";
-    }
-
-    if (source === "trends") {
-      actorId = "easyapi/google-trends";
-    }
-
-    if (!actorId) {
-      return NextResponse.json(
-        { error: "Unknown source" },
-        { status: 400 }
-      );
-    }
-
-    // ---- PREPARE INPUT ----
-
-    let input: any = {};
-
-    if (source === "google-maps") {
-      input = {
-        searchStringsArray: [q],
-        locationQuery: "Ireland",
-        maxCrawledPlacesPerSearch: 10,
-      };
-    } else {
-      input = { search: q };
-    }
-
-    // ---- RUN APIFY ACTOR ----
+    const input =
+      source === "google-maps"
+        ? {
+            searchStringsArray: [q],
+            locationQuery: "Ireland",
+            maxCrawledPlacesPerSearch: 10,
+          }
+        : { search: q };
 
     const runRes = await fetch(
       `https://api.apify.com/v2/acts/${actorId}/runs?token=${APIFY_TOKEN}`,
@@ -80,64 +58,36 @@ export async function GET(req: Request) {
 
     if (!runRes.ok) {
       const text = await runRes.text();
-      return NextResponse.json(
-        { error: "Apify request failed", details: text },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "Apify run failed", details: text }, { status: 500 });
     }
 
-    const runJson = await runRes.json();
-    const datasetId = runJson?.data?.defaultDatasetId;
+    const runData = await runRes.json();
+    const datasetId = runData?.data?.defaultDatasetId;
 
     if (!datasetId) {
-      return NextResponse.json(
-        { error: "Could not find datasetId from Apify run" },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "No datasetId returned" }, { status: 500 });
     }
 
-    // ---- WAIT A BIT FOR RESULTS ----
-
     await new Promise((r) => setTimeout(r, 8000));
-
-    // ---- FETCH RESULTS ----
 
     const itemsRes = await fetch(
       `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`
     );
 
-    if (!itemsRes.ok) {
-      const text = await itemsRes.text();
-      return NextResponse.json(
-        { error: "Failed fetching dataset", details: text },
-        { status: 500 }
-      );
-    }
-
     const items = await itemsRes.json();
 
-    // ---- NORMALISE OUTPUT ----
-
-    const normalized = items.map((item: any) => ({
-      title: item.name || item.title || item.author || "Unknown",
+    const normalized = items.map((i: any) => ({
+      title: i.name || i.title || "Unknown",
       type: source,
       source,
-      snippet:
-        item.text ||
-        item.description ||
-        item.snippet ||
-        item.reviewText ||
-        "",
-      url: item.url || item.link || "",
-      rating: item.rating || item.score || null,
+      snippet: i.text || i.description || "",
+      url: i.url || "",
+      rating: i.rating || null,
     }));
 
     return NextResponse.json({ items: normalized });
-
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "Unexpected error" },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
+
