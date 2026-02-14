@@ -1,118 +1,142 @@
 import { NextResponse } from "next/server";
 
+const APIFY_TOKEN = process.env.APIFY_TOKEN;
+
 export async function GET(req: Request) {
   try {
-    const token = process.env.APIFY_TOKEN;
-    if (!token) {
-      return NextResponse.json(
-        { items: [], error: "Missing APIFY_TOKEN in Vercel env vars" },
-        { status: 500 }
-      );
-    }
-
     const { searchParams } = new URL(req.url);
-    const source = searchParams.get("source") || "google-maps";
-    const q = searchParams.get("q") || "";
+    const source = searchParams.get("source");
+    const q = searchParams.get("q");
 
-    // Safety
-    if (!q.trim()) {
+    if (!source || !q) {
       return NextResponse.json(
-        { items: [], error: "Missing query (q)" },
+        { error: "Missing source or query" },
         { status: 400 }
       );
     }
 
-    // NOTE: For now we only implemented Google Maps via Apify.
-    // Other sources can return a clear JSON message (so UI doesn't break).
-    if (source !== "google-maps") {
+    if (!APIFY_TOKEN) {
       return NextResponse.json(
-        { items: [], error: `Source "${source}" not wired yet (UI is ready).` },
-        { status: 200 }
-      );
-    }
-
-    // Apify actor
-    const actorId = "compass/crawler-google-places";
-
-    // Smaller input so it runs fast + cheap
-    const input = {
-      searchStringsArray: [q],
-      locationQuery: "Ireland",
-      maxCrawledPlacesPerSearch: 10,
-      // Turn ON reviews only if you want (can increase cost/time):
-      // includeReviews: true,
-      // maxReviews: 20,
-    };
-
-    // Start actor run
-    const startRes = await fetch(`https://api.apify.com/v2/acts/${actorId}/runs`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(input),
-    });
-
-    const startText = await startRes.text();
-    let startJson: any;
-    try {
-      startJson = JSON.parse(startText);
-    } catch {
-      return NextResponse.json(
-        { items: [], error: "Apify start run returned non-JSON", details: startText.slice(0, 500) },
+        { error: "Missing APIFY_TOKEN env variable" },
         { status: 500 }
       );
     }
 
-    if (!startRes.ok) {
+    // ---- MAP SOURCE → ACTOR ----
+
+    let actorId = "";
+
+    if (source === "google-maps") {
+      actorId = "compass/crawler-google-places";
+    }
+
+    if (source === "trustpilot") {
+      actorId = "epctex/trustpilot-scraper";
+    }
+
+    if (source === "reddit") {
+      actorId = "trudax/reddit-scraper";
+    }
+
+    if (source === "quora") {
+      actorId = "cyberfly/quora-scraper";
+    }
+
+    if (source === "trends") {
+      actorId = "easyapi/google-trends";
+    }
+
+    if (!actorId) {
       return NextResponse.json(
-        { items: [], error: "Apify request failed", details: startJson },
-        { status: 500 }
+        { error: "Unknown source" },
+        { status: 400 }
       );
     }
 
-    const datasetId = startJson?.data?.defaultDatasetId;
-    if (!datasetId) {
-      return NextResponse.json(
-        { items: [], error: "Could not find datasetId from Apify run", details: startJson },
-        { status: 500 }
-      );
+    // ---- PREPARE INPUT ----
+
+    let input: any = {};
+
+    if (source === "google-maps") {
+      input = {
+        searchStringsArray: [q],
+        locationQuery: "Ireland",
+        maxCrawledPlacesPerSearch: 10,
+      };
+    } else {
+      input = { search: q };
     }
 
-    // Fetch dataset items
-    const itemsRes = await fetch(
-      `https://api.apify.com/v2/datasets/${datasetId}/items?clean=true&format=json`,
+    // ---- RUN APIFY ACTOR ----
+
+    const runRes = await fetch(
+      `https://api.apify.com/v2/acts/${actorId}/runs?token=${APIFY_TOKEN}`,
       {
-        headers: { Authorization: `Bearer ${token}` },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
       }
     );
 
-    const itemsText = await itemsRes.text();
-    let itemsJson: any;
-    try {
-      itemsJson = JSON.parse(itemsText);
-    } catch {
+    if (!runRes.ok) {
+      const text = await runRes.text();
       return NextResponse.json(
-        { items: [], error: "Apify dataset returned non-JSON", details: itemsText.slice(0, 500) },
+        { error: "Apify request failed", details: text },
         { status: 500 }
       );
     }
 
-    // Normalize (simple)
-    const normalized = (Array.isArray(itemsJson) ? itemsJson : []).map((x: any) => ({
-      title: x?.title || x?.name || "Untitled",
-      type: "business",
-      source: "google-maps",
-      snippet: x?.address || x?.description || "",
-      url: x?.url || x?.website || "",
-      rating: x?.totalScore ?? x?.rating ?? null,
+    const runJson = await runRes.json();
+    const datasetId = runJson?.data?.defaultDatasetId;
+
+    if (!datasetId) {
+      return NextResponse.json(
+        { error: "Could not find datasetId from Apify run" },
+        { status: 500 }
+      );
+    }
+
+    // ---- WAIT A BIT FOR RESULTS ----
+
+    await new Promise((r) => setTimeout(r, 8000));
+
+    // ---- FETCH RESULTS ----
+
+    const itemsRes = await fetch(
+      `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`
+    );
+
+    if (!itemsRes.ok) {
+      const text = await itemsRes.text();
+      return NextResponse.json(
+        { error: "Failed fetching dataset", details: text },
+        { status: 500 }
+      );
+    }
+
+    const items = await itemsRes.json();
+
+    // ---- NORMALISE OUTPUT ----
+
+    const normalized = items.map((item: any) => ({
+      title: item.name || item.title || item.author || "Unknown",
+      type: source,
+      source,
+      snippet:
+        item.text ||
+        item.description ||
+        item.snippet ||
+        item.reviewText ||
+        "",
+      url: item.url || item.link || "",
+      rating: item.rating || item.score || null,
     }));
 
     return NextResponse.json({ items: normalized });
+
   } catch (err: any) {
     return NextResponse.json(
-      { items: [], error: "Server crashed", details: String(err?.message || err) },
+      { error: err.message || "Unexpected error" },
       { status: 500 }
     );
   }
