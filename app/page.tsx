@@ -1,23 +1,36 @@
+// app/page.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 
 type Item = {
   title: string;
   type: string;
   source: string;
-  snippet: string;
+  snippet?: string;
   url?: string;
-  date?: string;
   rating?: number | null;
+  date?: string | null;
 };
+
+const SOURCES = [
+  { value: "google-maps", label: "Google (business + reviews)" },
+  { value: "reddit", label: "Reddit (conversations)" },
+  { value: "quora", label: "Quora (questions)" },
+  { value: "trustpilot", label: "Trustpilot (reviews)" },
+  { value: "trends", label: "Google Trends (Ireland)" },
+];
 
 export default function Page() {
   const [q, setQ] = useState("Grid Finance");
   const [source, setSource] = useState("google-maps");
-  const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  const sourceLabel = useMemo(() => {
+    return SOURCES.find((s) => s.value === source)?.label || source;
+  }, [source]);
 
   async function run() {
     setLoading(true);
@@ -30,19 +43,14 @@ export default function Page() {
         { method: "GET" }
       );
 
-      // Some failures return non-JSON (plain text). Handle both safely.
-      let data: any = null;
-      const contentType = res.headers.get("content-type") || "";
+      // Safest approach: read text first, then parse JSON
+      const text = await res.text();
 
-      if (contentType.includes("application/json")) {
-        data = await res.json();
-      } else {
-        const text = await res.text();
-        try {
-          data = JSON.parse(text);
-        } catch {
-          data = { error: text };
-        }
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Server returned non-JSON: ${text.slice(0, 120)}`);
       }
 
       if (!res.ok) {
@@ -50,6 +58,9 @@ export default function Page() {
       }
 
       setItems(Array.isArray(data?.items) ? data.items : []);
+      if (!Array.isArray(data?.items)) {
+        setError("Response was OK but items were missing.");
+      }
     } catch (e: any) {
       setError(e?.message || "Failed");
     } finally {
@@ -58,37 +69,36 @@ export default function Page() {
   }
 
   return (
-    <main
-      style={{
-        padding: 24,
-        fontFamily:
-          'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
-        color: "white",
-        background: "#0b0b0f",
-        minHeight: "100vh",
-      }}
-    >
-      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 6 }}>
+    <main style={{ padding: 24, fontFamily: "system-ui" }}>
+      <h1 style={{ fontSize: 28, fontWeight: 700, margin: 0 }}>
         Wasper Intelligence
       </h1>
-
-      <p style={{ opacity: 0.75, marginTop: 0, marginBottom: 18 }}>
-        Internal research engine for reviews + conversations (Google, Reddit, Trustpilot, Quora, Trends).
+      <p style={{ opacity: 0.75, marginTop: 6 }}>
+        Internal research engine for reviews + conversations (Google, Reddit,
+        Trustpilot, Quora, Trends).
       </p>
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", maxWidth: 980 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          marginTop: 16,
+          flexWrap: "wrap",
+        }}
+      >
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search e.g. Grid Finance / NuSolas / The Flame"
+          placeholder="Search query (e.g. Grid Finance)"
           style={{
-            flex: 1,
-            padding: "12px 14px",
+            width: 420,
+            maxWidth: "100%",
+            padding: "10px 12px",
             borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.15)",
+            background: "rgba(255,255,255,0.03)",
             color: "white",
-            outline: "none",
           }}
         />
 
@@ -96,63 +106,59 @@ export default function Page() {
           value={source}
           onChange={(e) => setSource(e.target.value)}
           style={{
-            width: 240,
-            padding: "12px 14px",
+            padding: "10px 12px",
             borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.15)",
+            background: "rgba(255,255,255,0.03)",
             color: "white",
-            outline: "none",
           }}
         >
-          <option value="google-maps">Google (business + reviews)</option>
-          <option value="trustpilot">Trustpilot (reviews)</option>
-          <option value="reddit">Reddit (discussions)</option>
-          <option value="quora">Quora (questions)</option>
-          <option value="trends">Google Trends (Ireland)</option>
+          {SOURCES.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
         </select>
 
         <button
           onClick={run}
           disabled={loading}
           style={{
-            padding: "12px 16px",
+            padding: "10px 16px",
             borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.16)",
-            background: loading ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.06)",
+            border: "1px solid rgba(255,255,255,0.15)",
+            background: loading ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)",
             color: "white",
             cursor: loading ? "not-allowed" : "pointer",
-            fontWeight: 600,
-            minWidth: 110,
           }}
         >
-          {loading ? "Running..." : "Run"}
+          {loading ? "Running…" : "Run"}
         </button>
       </div>
 
-      {error ? (
-        <p style={{ color: "#ff4d4f", marginTop: 14 }}>{`Error: ${error}`}</p>
-      ) : null}
+      {error && (
+        <div style={{ marginTop: 14, color: "#ff6b6b" }}>
+          <strong>Error:</strong> {error}
+        </div>
+      )}
 
-      <h2 style={{ marginTop: 22, marginBottom: 10, fontSize: 18 }}>Results</h2>
+      <h2 style={{ marginTop: 22, fontSize: 18 }}>Results</h2>
 
       <div
         style={{
           border: "1px solid rgba(255,255,255,0.12)",
           borderRadius: 12,
           overflow: "hidden",
-          maxWidth: 1100,
         }}
       >
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "2.2fr 1fr 1.2fr 3fr",
+            gridTemplateColumns: "2fr 1fr 1fr 3fr",
             gap: 0,
-            padding: "12px 14px",
+            padding: "10px 12px",
             background: "rgba(255,255,255,0.04)",
-            fontWeight: 700,
-            borderBottom: "1px solid rgba(255,255,255,0.10)",
+            fontWeight: 600,
           }}
         >
           <div>Title</div>
@@ -162,20 +168,21 @@ export default function Page() {
         </div>
 
         {items.length === 0 ? (
-          <div style={{ padding: "14px", opacity: 0.7 }}>No results yet. Run a query.</div>
+          <div style={{ padding: 12, opacity: 0.7 }}>
+            No results yet. Run a query for <em>{sourceLabel}</em>.
+          </div>
         ) : (
           items.map((it, idx) => (
             <div
               key={idx}
               style={{
                 display: "grid",
-                gridTemplateColumns: "2.2fr 1fr 1.2fr 3fr",
-                padding: "12px 14px",
-                borderTop: idx === 0 ? "none" : "1px solid rgba(255,255,255,0.08)",
-                gap: 0,
+                gridTemplateColumns: "2fr 1fr 1fr 3fr",
+                padding: "10px 12px",
+                borderTop: "1px solid rgba(255,255,255,0.08)",
               }}
             >
-              <div style={{ paddingRight: 10 }}>
+              <div style={{ paddingRight: 8 }}>
                 {it.url ? (
                   <a
                     href={it.url}
@@ -188,18 +195,32 @@ export default function Page() {
                 ) : (
                   it.title
                 )}
+                {typeof it.rating === "number" && (
+                  <div style={{ opacity: 0.75, fontSize: 12, marginTop: 2 }}>
+                    Rating: {it.rating}
+                  </div>
+                )}
               </div>
-              <div style={{ opacity: 0.85 }}>{it.type}</div>
-              <div style={{ opacity: 0.85 }}>{it.source}</div>
-              <div style={{ opacity: 0.8 }}>{it.snippet}</div>
+              <div>{it.type}</div>
+              <div>{it.source}</div>
+              <div style={{ opacity: 0.85 }}>{it.snippet || ""}</div>
             </div>
           ))
         )}
       </div>
 
-      <p style={{ opacity: 0.6, marginTop: 12, fontSize: 13 }}>
-        Next: we’ll standardise output from each source into: title, type, source, snippet, url, date, rating (if review).
+      <p style={{ marginTop: 10, opacity: 0.6, fontSize: 12 }}>
+        Next: we standardise output from each source into: title, type, source,
+        snippet, url, date, rating (if review).
       </p>
+
+      <style jsx global>{`
+        html,
+        body {
+          background: #0b0b0c;
+          color: white;
+        }
+      `}</style>
     </main>
   );
 }
