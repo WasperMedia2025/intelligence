@@ -13,47 +13,44 @@ type UiItem = {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const source = searchParams.get("source") || "google-maps";
-  const q = searchParams.get("q") || "";
+  const q = (searchParams.get("q") || "").trim();
 
   const token = process.env.APIFY_TOKEN;
   if (!token) {
     return NextResponse.json({ items: [], error: "Missing APIFY_TOKEN" }, { status: 500 });
   }
-
-  // 1) Start the Apify Actor (Google Maps Scraper)
-  // NOTE: This actor is for Google Maps business data. Trustpilot/Reddit/Quora will need separate actors later.
-  const startRes = await fetch(
-    `https://api.apify.com/v2/acts/compass~crawler-google-places/runs?token=${token}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        searchStringsArray: [q],
-        locationQuery: "Ireland",
-        maxCrawledPlacesPerSearch: 10,
-      }),
-    }
-  );
-
-  const startJson = await startRes.json();
-  const datasetId =
-    startJson?.data?.defaultDatasetId || startJson?.data?.data?.defaultDatasetId;
-
-  if (!datasetId) {
-    return NextResponse.json({ items: [], error: "Could not find datasetId from Apify run" }, { status: 500 });
+  if (!q) {
+    return NextResponse.json({ items: [], error: "Missing query (q)" }, { status: 400 });
   }
 
-  // 2) Fetch dataset items (this is the actual scraped data)
-  const itemsRes = await fetch(
-    `https://api.apify.com/v2/datasets/${datasetId}/items?clean=true&token=${token}`
-  );
+  // Runs the actor AND returns items directly (no datasetId needed)
+  const actorId = "compass~crawler-google-places";
+  const url = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${token}&clean=true`;
 
-  const rawItems = await itemsRes.json();
+  const input = {
+    searchStringsArray: [q],
+    locationQuery: "Ireland",
+    maxCrawledPlacesPerSearch: 10,
+  };
 
-  // 3) Normalise into the exact format the UI needs
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+
+  const rawItems = await res.json();
+
+  if (!res.ok) {
+    return NextResponse.json(
+      { items: [], error: "Apify request failed", details: rawItems },
+      { status: 500 }
+    );
+  }
+
   const arr: any[] = Array.isArray(rawItems) ? rawItems : [];
 
-  const normalized: UiItem[] = arr.map((p) => {
+  const items: UiItem[] = arr.map((p) => {
     const title = p.title || p.name || "Untitled";
     const rating =
       typeof p.totalScore === "number" ? p.totalScore :
@@ -66,7 +63,7 @@ export async function GET(req: Request) {
       p.categoryName,
       p.street,
       p.city,
-      p.countryCode,
+      p.postalCode,
       p.phone,
     ].filter(Boolean);
 
@@ -81,6 +78,5 @@ export async function GET(req: Request) {
     };
   });
 
-  // THIS is the important bit: UI expects { items: [...] }
-  return NextResponse.json({ items: normalized });
+  return NextResponse.json({ items });
 }
