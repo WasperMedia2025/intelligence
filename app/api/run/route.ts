@@ -1,30 +1,43 @@
 import { NextResponse } from "next/server";
 
+type Source = "google-maps" | "reddit" | "quora" | "trustpilot" | "trends";
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-async function startApifyRun(input: {
-  q: string;
-  maxPlaces?: number;
-  maxReviews?: number;
-}) {
+export async function POST(req: Request) {
   const token = process.env.APIFY_TOKEN;
   if (!token) {
     return NextResponse.json({ error: "Missing APIFY_TOKEN" }, { status: 500 });
   }
 
-  const q = (input.q || "").trim();
+  const body = await req.json().catch(() => ({}));
+  const source = (body?.source || "google-maps") as Source;
+  const q = String(body?.q || "").trim();
+
+  const maxPlaces = clamp(Number(body?.maxPlaces ?? 3), 1, 20);
+  const maxReviews = clamp(Number(body?.maxReviews ?? 10), 1, 50);
+
   if (!q) {
-    return NextResponse.json({ error: "Missing q" }, { status: 400 });
+    return NextResponse.json({ error: "Missing q (search query)" }, { status: 400 });
   }
 
-  const maxPlaces = clamp(Number(input.maxPlaces ?? 3), 1, 50);
-  const maxReviews = clamp(Number(input.maxReviews ?? 10), 0, 200);
+  // Stabilise Google first (others will be added after this is solid)
+  if (source !== "google-maps") {
+    return NextResponse.json(
+      {
+        error: `Source "${source}" not wired yet.`,
+        note: "Google Reviews is stabilised first, then Reddit/Quora/Trustpilot/Trends will be added.",
+      },
+      { status: 400 }
+    );
+  }
 
   try {
-    const start = await fetch(
-      `https://api.apify.com/v2/acts/compass~crawler-google-places/runs?token=${token}`,
+    // IMPORTANT: waitForFinish=0 returns immediately (prevents Vercel timeout)
+    const startRes = await fetch(
+      `https://api.apify.com/v2/acts/compass~crawler-google-places/runs?token=${token}&waitForFinish=0`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -36,56 +49,34 @@ async function startApifyRun(input: {
       }
     );
 
-    const text = await start.text();
-    let run: any;
+    const text = await startRes.text();
+    let json: any;
     try {
-      run = JSON.parse(text);
+      json = JSON.parse(text);
     } catch {
       return NextResponse.json(
-        { error: "Apify start returned non-JSON", details: text },
+        { error: "Apify returned non-JSON", details: text.slice(0, 500) },
         { status: 500 }
       );
     }
 
-    const runId = run?.data?.id;
+    const runId = json?.data?.id;
     if (!runId) {
       return NextResponse.json(
-        { error: "Failed to start Apify run", details: run },
+        { error: "Failed to start Apify run", details: json },
         { status: 500 }
       );
     }
 
-    // Return immediately (important to avoid Vercel timeout)
-    return NextResponse.json({ status: "started", runId });
+    return NextResponse.json({
+      status: "started",
+      runId,
+      meta: { q, maxPlaces, maxReviews },
+    });
   } catch (e: any) {
     return NextResponse.json(
-      { error: "Apify request failed", details: e?.message || String(e) },
+      { error: "Start run failed", details: e?.message || String(e) },
       { status: 500 }
     );
   }
-}
-
-export async function POST(req: Request) {
-  let body: any = {};
-  try {
-    body = await req.json();
-  } catch {
-    body = {};
-  }
-
-  return startApifyRun({
-    q: body?.q,
-    maxPlaces: body?.maxPlaces,
-    maxReviews: body?.maxReviews,
-  });
-}
-
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-
-  return startApifyRun({
-    q: searchParams.get("q") || "",
-    maxPlaces: Number(searchParams.get("maxPlaces") || 3),
-    maxReviews: Number(searchParams.get("maxReviews") || 10),
-  });
 }
