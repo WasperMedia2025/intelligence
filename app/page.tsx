@@ -2,8 +2,9 @@
 
 import React, { useMemo, useState } from "react";
 
+type Source = "google-maps" | "reddit" | "quora" | "trustpilot" | "trends";
+
 type Item = {
-  id: string;
   title: string;
   type: string;
   source: string;
@@ -11,106 +12,69 @@ type Item = {
   url?: string;
   date?: string | null;
   rating?: number | null;
+  meta?: any;
 };
-
-function safePreview(s: string, n = 180) {
-  const t = (s || "").replace(/\s+/g, " ").trim();
-  return t.length > n ? t.slice(0, n) + "…" : t;
-}
-
-async function safeJson(res: Response) {
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    // If server returned HTML or plain text, show a helpful message
-    throw new Error(`Server returned non-JSON: ${safePreview(text, 120)}`);
-  }
-}
 
 export default function Page() {
   const [q, setQ] = useState("Grid Finance");
-
-  // Only Google is wired right now (stable)
-  const [source, setSource] = useState("google-maps");
+  const [source, setSource] = useState<Source>("google-maps");
 
   // Filters
-  const [days, setDays] = useState("30");
-  const [minRating, setMinRating] = useState("0");
-  const [maxPlaces, setMaxPlaces] = useState("8");
-  const [maxReviews, setMaxReviews] = useState("20");
+  const [dateRangeDays, setDateRangeDays] = useState<number>(30); // 0 = all
+  const [minRating, setMinRating] = useState<number>(0); // 0 = any
+  const [maxPlaces, setMaxPlaces] = useState<number>(3);
+  const [maxReviews, setMaxReviews] = useState<number>(10);
 
   const [loading, setLoading] = useState(false);
-  const [statusText, setStatusText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<Item[]>([]);
 
-  const canRun = useMemo(() => q.trim().length > 0, [q]);
+  const canUseFilters = source === "google-maps";
 
-  async function pollRun(runId: string) {
-    // Poll up to ~2 minutes (60 * 2s)
-    for (let i = 0; i < 60; i++) {
-      const pollUrl =
-        `/api/run?source=${encodeURIComponent(source)}` +
-        `&q=${encodeURIComponent(q.trim())}` +
-        `&runId=${encodeURIComponent(runId)}` +
-        `&days=${encodeURIComponent(days)}` +
-        `&minRating=${encodeURIComponent(minRating)}`;
-
-      const res = await fetch(pollUrl, { cache: "no-store" });
-      const json = await safeJson(res);
-
-      if (json?.status === "SUCCEEDED") {
-        setItems(json.items || []);
-        setStatusText(null);
-        return;
-      }
-
-      setStatusText(`Running… (${json?.status || "WAITING"})`);
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-
-    throw new Error("Still running after 2 minutes. Try a smaller max places/reviews.");
-  }
+  const dateLabel = useMemo(() => {
+    if (!dateRangeDays) return "All time";
+    if (dateRangeDays === 7) return "Last 7 days";
+    if (dateRangeDays === 30) return "Last 30 days";
+    if (dateRangeDays === 90) return "Last 90 days";
+    return `Last ${dateRangeDays} days`;
+  }, [dateRangeDays]);
 
   async function run() {
     setLoading(true);
     setError(null);
     setItems([]);
-    setStatusText("Starting…");
 
     try {
-      if (!canRun) throw new Error("Enter a query first.");
+      const res = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q,
+          source,
+          dateRangeDays: canUseFilters ? dateRangeDays : 0,
+          minRating: canUseFilters ? minRating : 0,
+          maxPlaces: canUseFilters ? maxPlaces : 3,
+          maxReviews: canUseFilters ? maxReviews : 10,
+        }),
+      });
 
-      const startUrl =
-        `/api/run?source=${encodeURIComponent(source)}` +
-        `&q=${encodeURIComponent(q.trim())}` +
-        `&days=${encodeURIComponent(days)}` +
-        `&minRating=${encodeURIComponent(minRating)}` +
-        `&maxPlaces=${encodeURIComponent(maxPlaces)}` +
-        `&maxReviews=${encodeURIComponent(maxReviews)}`;
+      const text = await res.text();
 
-      const startRes = await fetch(startUrl, { cache: "no-store" });
-      const startJson = await safeJson(startRes);
-
-      if (startJson?.error) throw new Error(startJson.error);
-
-      if (startJson?.status === "SUCCEEDED") {
-        setItems(startJson.items || []);
-        setStatusText(null);
-        return;
+      // Always guard JSON parsing (prevents “Unexpected token …”)
+      let json: any = {};
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new Error(text || "Server returned a non-JSON response.");
       }
 
-      if (startJson?.status === "RUNNING" && startJson?.runId) {
-        setStatusText("Running…");
-        await pollRun(startJson.runId);
-        return;
+      if (!res.ok) {
+        throw new Error(json?.details || json?.error || "Request failed");
       }
 
-      throw new Error("Unexpected response from API.");
+      setItems(Array.isArray(json.items) ? json.items : []);
     } catch (e: any) {
       setError(e?.message || "Failed");
-      setStatusText(null);
     } finally {
       setLoading(false);
     }
@@ -126,18 +90,26 @@ export default function Page() {
         Trustpilot, Quora, Trends).
       </p>
 
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginTop: 16,
+        }}
+      >
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search query (e.g. Grid Finance)"
+          placeholder="Search term (e.g. Grid Finance / NuSolas / The Flame)"
           style={{
             width: 420,
             maxWidth: "100%",
-            padding: "12px 14px",
+            padding: "10px 12px",
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.06)",
+            background: "rgba(255,255,255,0.03)",
             color: "white",
             outline: "none",
           }}
@@ -145,117 +117,141 @@ export default function Page() {
 
         <select
           value={source}
-          onChange={(e) => setSource(e.target.value)}
+          onChange={(e) => setSource(e.target.value as Source)}
           style={{
-            padding: "12px 14px",
+            padding: "10px 12px",
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.06)",
+            background: "rgba(255,255,255,0.03)",
             color: "white",
             outline: "none",
           }}
         >
           <option value="google-maps">Google (business + reviews)</option>
+          <option value="reddit">Reddit (threads)</option>
+          <option value="quora">Quora (questions)</option>
+          <option value="trustpilot">Trustpilot (reviews)</option>
+          <option value="trends">Google Trends (Ireland)</option>
         </select>
 
         <select
-          value={days}
-          onChange={(e) => setDays(e.target.value)}
+          value={dateRangeDays}
+          onChange={(e) => setDateRangeDays(Number(e.target.value))}
+          disabled={!canUseFilters}
+          title={!canUseFilters ? "Only enabled for Google in this build" : ""}
           style={{
-            padding: "12px 14px",
+            padding: "10px 12px",
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.06)",
-            color: "white",
+            background: "rgba(255,255,255,0.03)",
+            color: canUseFilters ? "white" : "rgba(255,255,255,0.4)",
             outline: "none",
           }}
-          title="Review date range"
         >
-          <option value="7">Last 7 days</option>
-          <option value="30">Last 30 days</option>
-          <option value="90">Last 90 days</option>
-          <option value="0">All time</option>
+          <option value={7}>Last 7 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+          <option value={0}>All time</option>
         </select>
 
         <select
           value={minRating}
-          onChange={(e) => setMinRating(e.target.value)}
+          onChange={(e) => setMinRating(Number(e.target.value))}
+          disabled={!canUseFilters}
+          title={!canUseFilters ? "Only enabled for Google in this build" : ""}
           style={{
-            padding: "12px 14px",
+            padding: "10px 12px",
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.06)",
-            color: "white",
+            background: "rgba(255,255,255,0.03)",
+            color: canUseFilters ? "white" : "rgba(255,255,255,0.4)",
             outline: "none",
           }}
-          title="Minimum star rating"
         >
-          <option value="0">Any rating</option>
-          <option value="3">3★+</option>
-          <option value="4">4★+</option>
-          <option value="5">5★ only</option>
+          <option value={0}>Any rating</option>
+          <option value={5}>5★ only</option>
+          <option value={4}>4★ and up</option>
+          <option value={3}>3★ and up</option>
+          <option value={2}>2★ and up</option>
+          <option value={1}>1★ and up</option>
         </select>
 
         <input
+          type="number"
           value={maxPlaces}
-          onChange={(e) => setMaxPlaces(e.target.value)}
+          onChange={(e) => setMaxPlaces(Number(e.target.value))}
+          disabled={!canUseFilters}
+          min={1}
+          max={8}
+          title="Keep small so runs finish quickly"
           style={{
-            width: 120,
-            padding: "12px 14px",
+            width: 90,
+            padding: "10px 12px",
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.06)",
-            color: "white",
+            background: "rgba(255,255,255,0.03)",
+            color: canUseFilters ? "white" : "rgba(255,255,255,0.4)",
             outline: "none",
           }}
-          placeholder="Max places"
-          title="Max places per search (lower = faster)"
         />
 
         <input
+          type="number"
           value={maxReviews}
-          onChange={(e) => setMaxReviews(e.target.value)}
+          onChange={(e) => setMaxReviews(Number(e.target.value))}
+          disabled={!canUseFilters}
+          min={0}
+          max={30}
+          title="Reviews per place"
           style={{
-            width: 140,
-            padding: "12px 14px",
+            width: 90,
+            padding: "10px 12px",
             borderRadius: 10,
             border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.06)",
-            color: "white",
+            background: "rgba(255,255,255,0.03)",
+            color: canUseFilters ? "white" : "rgba(255,255,255,0.4)",
             outline: "none",
           }}
-          placeholder="Max reviews"
-          title="Max reviews per place (lower = faster)"
         />
 
         <button
           onClick={run}
           disabled={loading}
           style={{
-            padding: "12px 16px",
+            padding: "10px 16px",
             borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.2)",
-            background: loading ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.12)",
+            border: "1px solid rgba(255,255,255,0.15)",
+            background: loading ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.1)",
             color: "white",
             cursor: loading ? "not-allowed" : "pointer",
-            fontWeight: 600,
           }}
         >
-          {loading ? "Running…" : "Run"}
+          {loading ? "Running..." : "Run"}
         </button>
       </div>
 
-      {statusText && (
-        <p style={{ marginTop: 12, opacity: 0.8 }}>{statusText}</p>
-      )}
+      <div style={{ marginTop: 10, opacity: 0.7, fontSize: 13 }}>
+        {source === "google-maps" ? (
+          <>
+            Filters active: <b>{dateLabel}</b>,{" "}
+            <b>{minRating ? `${minRating}★+` : "any rating"}</b>,{" "}
+            <b>{maxPlaces}</b> places, <b>{maxReviews}</b> reviews/place.
+            <div style={{ marginTop: 6 }}>
+              Tip: If it’s slow, reduce <b>Max places</b> and <b>Max reviews</b>.
+            </div>
+          </>
+        ) : (
+          <>This source is not wired yet in this build.</>
+        )}
+      </div>
 
       {error && (
-        <p style={{ marginTop: 12, color: "#ff6b6b" }}>
-          Error: {error}
-        </p>
+        <div style={{ marginTop: 14, color: "#ff6b6b" }}>
+          <b>Error:</b> {error}
+        </div>
       )}
 
-      <h2 style={{ marginTop: 18, fontSize: 18 }}>Results</h2>
+      <h2 style={{ marginTop: 20, fontSize: 18 }}>Results</h2>
 
       <div
         style={{
@@ -267,11 +263,11 @@ export default function Page() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "2fr 1fr 1fr 3fr 1fr",
+            gridTemplateColumns: "2fr 0.9fr 1fr 2.5fr 0.6fr",
             gap: 0,
-            padding: 12,
-            background: "rgba(255,255,255,0.06)",
-            fontWeight: 700,
+            padding: "10px 12px",
+            background: "rgba(255,255,255,0.04)",
+            fontWeight: 600,
           }}
         >
           <div>Title</div>
@@ -286,18 +282,19 @@ export default function Page() {
             No results yet. Run a query.
           </div>
         ) : (
-          items.map((it) => (
+          items.slice(0, 200).map((it, idx) => (
             <div
-              key={it.id}
+              key={idx}
               style={{
                 display: "grid",
-                gridTemplateColumns: "2fr 1fr 1fr 3fr 1fr",
-                padding: 12,
+                gridTemplateColumns: "2fr 0.9fr 1fr 2.5fr 0.6fr",
+                padding: "10px 12px",
                 borderTop: "1px solid rgba(255,255,255,0.08)",
+                gap: 0,
                 alignItems: "start",
               }}
             >
-              <div style={{ fontWeight: 650 }}>
+              <div style={{ paddingRight: 10 }}>
                 {it.url ? (
                   <a
                     href={it.url}
@@ -311,32 +308,23 @@ export default function Page() {
                   it.title
                 )}
                 {it.date ? (
-                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                    {String(it.date)}
+                  <div style={{ opacity: 0.6, fontSize: 12, marginTop: 4 }}>
+                    {new Date(it.date).toLocaleString()}
                   </div>
                 ) : null}
               </div>
               <div style={{ opacity: 0.85 }}>{it.type}</div>
               <div style={{ opacity: 0.85 }}>{it.source}</div>
-              <div style={{ opacity: 0.85 }}>{safePreview(it.snippet)}</div>
-              <div style={{ opacity: 0.85 }}>
-                {it.rating != null ? `${it.rating}★` : ""}
+              <div style={{ opacity: 0.8, whiteSpace: "pre-wrap" }}>
+                {it.snippet}
+              </div>
+              <div style={{ opacity: 0.9 }}>
+                {it.rating != null ? it.rating : ""}
               </div>
             </div>
           ))
         )}
       </div>
-
-      <p style={{ marginTop: 10, opacity: 0.6, fontSize: 12 }}>
-        Tip: If it’s slow, reduce “Max places” and “Max reviews”.
-      </p>
-
-      <style jsx global>{`
-        body {
-          background: #0b0b0f;
-          color: white;
-        }
-      `}</style>
     </main>
   );
 }
