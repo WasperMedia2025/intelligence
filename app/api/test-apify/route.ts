@@ -7,38 +7,23 @@ export async function GET() {
     return NextResponse.json({ error: "Missing APIFY_TOKEN" }, { status: 500 });
   }
 
-  // Start actor run
-  const runRes = await fetch(
-    `https://api.apify.com/v2/acts/compass~crawler-google-places/runs?token=${token}`,
+  const input = {
+    searchStringsArray: ["finance company Dublin"],
+    locationQuery: "Dublin, Ireland",
+    maxCrawledPlacesPerSearch: 5,
+  };
+
+  // This endpoint runs the actor and returns dataset items once finished
+  const res = await fetch(
+    `https://api.apify.com/v2/acts/compass~crawler-google-places/run-sync-get-dataset-items?token=${token}&clean=true`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        searchStringsArray: ["finance company Dublin"],
-        maxCrawledPlacesPerSearch: 20,
-      }),
+      body: JSON.stringify(input),
     }
   );
 
-  const runData = await runRes.json();
-  const runId = runData.data.id;
-  const datasetId = runData.data.defaultDatasetId;
+  const items = await res.json();
 
-  // Wait until run finishes
-  let status = "RUNNING";
-
-  while (status === "RUNNING" || status === "READY") {
-    await new Promise((r) => setTimeout(r, 5000));
-
-    const checkRes = await fetch(
-      `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`
-    );
-
-    const checkData = await checkRes.json();
-    status = checkData.data.status;
-
-    if (status === "SUCCEEDED") break;
-  }
-
-  // Fetch results
-  const resultsRes = await fetch(
+  return NextResponse.json(items, { status: res.ok ? 200 : 500 });
+}
