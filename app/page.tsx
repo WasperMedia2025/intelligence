@@ -1,65 +1,123 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
+
+type ResultItem = Record<string, any>;
 
 export default function Home() {
+  const [query, setQuery] = useState("Grid Finance");
+  const [source, setSource] = useState("google-maps");
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<ResultItem[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    setItems([]);
+
+    try {
+      const res = await fetch(`/api/run?source=${encodeURIComponent(source)}&q=${encodeURIComponent(query)}`);
+      const json = await res.json();
+
+      if (!res.ok) throw new Error(json?.error || "Something went wrong");
+
+      // We’ll standardise to { items: [...] } in every endpoint
+      setItems(json.items || []);
+    } catch (e: any) {
+      setError(e.message || "Failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main style={{ padding: 24, fontFamily: "system-ui" }}>
+      <h1 style={{ fontSize: 28, fontWeight: 700 }}>Wasper Intelligence</h1>
+      <p style={{ opacity: 0.7, marginTop: 6 }}>
+        Internal research engine for reviews + conversations (Google, Reddit, Trustpilot, Quora, Trends).
+      </p>
+
+      <div style={{ display: "flex", gap: 12, marginTop: 18, flexWrap: "wrap" }}>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search e.g. Grid Finance / heat pumps / mortgage broker Dublin"
+          style={{ padding: 10, minWidth: 360, borderRadius: 10, border: "1px solid #333" }}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+
+        <select
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+          style={{ padding: 10, borderRadius: 10, border: "1px solid #333" }}
+        >
+          <option value="google-maps">Google (business + reviews)</option>
+          <option value="reddit">Reddit (posts + questions)</option>
+          <option value="trustpilot">Trustpilot (reviews)</option>
+          <option value="quora">Quora (questions)</option>
+          <option value="trends">Google Trends (Ireland)</option>
+        </select>
+
+        <button
+          onClick={run}
+          disabled={loading}
+          style={{
+            padding: "10px 16px",
+            borderRadius: 10,
+            border: "1px solid #333",
+            cursor: loading ? "not-allowed" : "pointer",
+            fontWeight: 600,
+          }}
+        >
+          {loading ? "Running..." : "Run"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 14, color: "tomato" }}>
+          Error: {error}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+      )}
+
+      <div style={{ marginTop: 18 }}>
+        <h2 style={{ fontSize: 18, fontWeight: 700 }}>Results</h2>
+
+        <div style={{ marginTop: 10, border: "1px solid #333", borderRadius: 12, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead style={{ background: "#111" }}>
+              <tr>
+                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #333" }}>Title</th>
+                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #333" }}>Type</th>
+                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #333" }}>Source</th>
+                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #333" }}>Snippet</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {items.length === 0 && (
+                <tr>
+                  <td colSpan={4} style={{ padding: 12, opacity: 0.6 }}>
+                    No results yet. Run a query.
+                  </td>
+                </tr>
+              )}
+
+              {items.map((item, idx) => (
+                <tr key={idx} style={{ borderTop: "1px solid #222" }}>
+                  <td style={{ padding: 10 }}>{item.title || item.name || "-"}</td>
+                  <td style={{ padding: 10 }}>{item.type || "-"}</td>
+                  <td style={{ padding: 10 }}>{item.source || source}</td>
+                  <td style={{ padding: 10, opacity: 0.8 }}>{item.snippet || item.text?.slice?.(0, 140) || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      </main>
-    </div>
+
+        <p style={{ marginTop: 10, opacity: 0.6, fontSize: 12 }}>
+          Next: we’ll standardise output from each source into: title, type, source, snippet, url, date, rating (if review).
+        </p>
+      </div>
+    </main>
   );
 }
