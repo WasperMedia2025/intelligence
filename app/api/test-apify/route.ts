@@ -7,7 +7,7 @@ export async function GET() {
     return NextResponse.json({ error: "Missing APIFY_TOKEN" }, { status: 500 });
   }
 
-  // Step 1: Start actor run
+  // Start actor run
   const runRes = await fetch(
     `https://api.apify.com/v2/acts/compass~crawler-google-places/runs?token=${token}`,
     {
@@ -21,12 +21,24 @@ export async function GET() {
   );
 
   const runData = await runRes.json();
-
+  const runId = runData.data.id;
   const datasetId = runData.data.defaultDatasetId;
 
-  // Wait 10 seconds for scraping to complete
-  await new Promise((r) => setTimeout(r, 10000));
+  // Wait until run finishes
+  let status = "RUNNING";
 
-  // Step 2: Fetch scraped results
+  while (status === "RUNNING" || status === "READY") {
+    await new Promise((r) => setTimeout(r, 5000));
+
+    const checkRes = await fetch(
+      `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`
+    );
+
+    const checkData = await checkRes.json();
+    status = checkData.data.status;
+
+    if (status === "SUCCEEDED") break;
+  }
+
+  // Fetch results
   const resultsRes = await fetch(
-    `https://api.apify.com/v2/dat
