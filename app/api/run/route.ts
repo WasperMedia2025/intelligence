@@ -1,226 +1,262 @@
-// app/api/run/route.ts
 import { NextResponse } from "next/server";
 
-type NormalizedItem = {
-  title: string;
-  type: string;
-  source: string;
-  snippet?: string;
-  url?: string;
-  rating?: number | null;
-  date?: string | null;
-};
+type Source =
+  | "google-maps" // Google business + reviews
+  | "reddit"
+  | "quora"
+  | "trustpilot"
+  | "trends";
 
-const APIFY_BASE = "https://api.apify.com/v2";
-
-// ✅ Actor IDs (Apify store)
-// This one you already used successfully:
-const ACTOR_GOOGLE_MAPS = "compass/crawler-google-places";
-
-// Helper: safe JSON response (always JSON, even on errors)
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+function jsonError(message: string, status = 500, details?: any) {
+  return NextResponse.json(
+    { items: [], error: message, details: details ?? null },
+    { status }
+  );
 }
 
-// Helper: fetch JSON or throw readable error
-async function fetchJson(url: string, init?: RequestInit) {
-  const res = await fetch(url, init);
-  const text = await res.text();
-
-  // Try parse JSON
-  try {
-    const parsed = JSON.parse(text);
-    if (!res.ok) {
-      throw new Error(
-        parsed?.error?.message ||
-          parsed?.message ||
-          parsed?.error ||
-          `Request failed (${res.status})`
-      );
-    }
-    return parsed;
-  } catch {
-    // Not JSON
-    if (!res.ok) throw new Error(text || `Request failed (${res.status})`);
-    // If OK but not JSON, still error (we expect JSON from Apify)
-    throw new Error("Unexpected non-JSON response from upstream.");
-  }
+function toInt(v: string | null, fallback: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizeGooglePlace(p: any): NormalizedItem {
-  // The actor returns fields like title/name, placeId, address, website, totalScore, etc.
-  const title = p?.title || p?.name || "Unknown";
-  const rating =
-    typeof p?.totalScore === "number"
-      ? p.totalScore
-      : typeof p?.rating === "number"
-      ? p.rating
-      : null;
-
-  const url =
-    p?.url ||
-    p?.googleUrl ||
-    p?.placeUrl ||
-    (p?.placeId
-      ? `https://www.google.com/maps/search/?api=1&query=Google&query_place_id=${encodeURIComponent(
-          p.placeId
-        )}`
-      : undefined);
-
-  const snippetParts: string[] = [];
-  if (p?.address) snippetParts.push(p.address);
-  if (p?.phone) snippetParts.push(p.phone);
-  if (p?.website) snippetParts.push(p.website);
-
-  return {
-    title,
-    type: "business",
-    source: "google-maps",
-    snippet: snippetParts.join(" • "),
-    url,
-    rating,
-    date: null,
-  };
+function parseDays(v: string | null) {
+  const d = Number(v);
+  if (!Number.isFinite(d) || d < 0) return 0;
+  return d;
 }
 
-async function runApifyActorAndGetItems(params: {
-  token: string;
-  actorId: string;
-  input: any;
-  waitSeconds?: number;
-  pollSeconds?: number;
-}) {
-  const { token, actorId, input } = params;
-  const waitSeconds = params.waitSeconds ?? 30; // initial wait
-  const pollSeconds = params.pollSeconds ?? 60; // max poll time
-
-  // Start run (wait a bit)
-  const runStartUrl = `${APIFY_BASE}/acts/${encodeURIComponent(
-    actorId
-  )}/runs?token=${encodeURIComponent(token)}&waitForFinish=${waitSeconds}`;
-
-  const started = await fetchJson(runStartUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-
-  const runId = started?.data?.id;
-  if (!runId) throw new Error("Apify: run id missing.");
-
-  // Poll run until finished or timeout
-  const deadline = Date.now() + pollSeconds * 1000;
-  let run = started?.data;
-
-  while (
-    run &&
-    run.status &&
-    !["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"].includes(run.status) &&
-    Date.now() < deadline
-  ) {
-    await new Promise((r) => setTimeout(r, 1500));
-    const runUrl = `${APIFY_BASE}/actor-runs/${encodeURIComponent(
-      runId
-    )}?token=${encodeURIComponent(token)}`;
-    const runResp = await fetchJson(runUrl);
-    run = runResp?.data;
-  }
-
-  if (!run?.status) throw new Error("Apify: run status missing.");
-
-  if (run.status !== "SUCCEEDED") {
-    // include Apify details if present
-    throw new Error(
-      `Apify run ${run.status}${
-        run?.statusMessage ? `: ${run.statusMessage}` : ""
-      }`
-    );
-  }
-
-  const datasetId = run?.defaultDatasetId;
-  if (!datasetId) throw new Error("Could not find datasetId from Apify run.");
-
-  // Fetch dataset items
-  const itemsUrl = `${APIFY_BASE}/datasets/${encodeURIComponent(
-    datasetId
-  )}/items?token=${encodeURIComponent(token)}&clean=true&format=json`;
-
-  const itemsRes = await fetch(itemsUrl);
-  const itemsText = await itemsRes.text();
-
-  try {
-    const items = JSON.parse(itemsText);
-    if (!Array.isArray(items)) {
-      throw new Error("Dataset items response was not an array.");
-    }
-    return items;
-  } catch {
-    throw new Error("Failed to parse dataset items JSON.");
-  }
+function withinDays(isoOrDate: any, days: number) {
+  if (!days) return true; // 0 => all time
+  if (!isoOrDate) return true;
+  const dt = new Date(isoOrDate);
+  if (Number.isNaN(dt.getTime())) return true;
+  const now = Date.now();
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
+  return dt.getTime() >= cutoff;
 }
 
+function pickReviewDate(r: any) {
+  return (
+    r?.publishedAt ||
+    r?.publishedAtDate ||
+    r?.publishedAtDateTime ||
+    r?.date ||
+    r?.reviewDate ||
+    null
+  );
+}
+
+/**
+ * IMPORTANT:
+ * We use async pattern:
+ * - First call starts run => returns { status:"RUNNING", runId }
+ * - UI polls /api/run?runId=... until status SUCCEEDED
+ * - Then route fetches dataset items and normalizes them
+ */
 export async function GET(req: Request) {
+  const token = process.env.APIFY_TOKEN;
+  if (!token) return jsonError("Missing APIFY_TOKEN in Vercel env vars", 500);
+
+  const url = new URL(req.url);
+  const source = (url.searchParams.get("source") || "") as Source;
+  const q = (url.searchParams.get("q") || "").trim();
+
+  const runId = (url.searchParams.get("runId") || "").trim();
+
+  // Filters
+  const maxPlaces = Math.min(toInt(url.searchParams.get("maxPlaces"), 8), 25);
+  const maxReviews = Math.min(toInt(url.searchParams.get("maxReviews"), 20), 200);
+  const minRating = Math.min(Math.max(toInt(url.searchParams.get("minRating"), 0), 0), 5);
+  const days = parseDays(url.searchParams.get("days")); // 0 = all time
+
+  if (!source) return jsonError("Missing source", 400);
+  if (!q && source !== "trends") return jsonError("Missing q", 400);
+
+  // --- 1) POLL EXISTING RUN (no timeout, quick request) ---
+  if (runId) {
+    try {
+      const runRes = await fetch(
+        `https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}?token=${encodeURIComponent(
+          token
+        )}`,
+        { cache: "no-store" }
+      );
+      const runJson = await runRes.json();
+
+      const status = runJson?.data?.status as string | undefined;
+      if (!status) return jsonError("Could not read Apify run status", 500, runJson);
+
+      if (status === "RUNNING" || status === "READY") {
+        return NextResponse.json({
+          status,
+          runId,
+          message:
+            "Apify run is still running. Keep polling until it finishes.",
+        });
+      }
+
+      if (status !== "SUCCEEDED") {
+        return jsonError("Apify run failed", 500, runJson);
+      }
+
+      const datasetId =
+        runJson?.data?.defaultDatasetId ||
+        runJson?.data?.output?.datasetId ||
+        null;
+
+      if (!datasetId) {
+        return jsonError("Could not find datasetId from Apify run", 500, runJson);
+      }
+
+      const itemsRes = await fetch(
+        `https://api.apify.com/v2/datasets/${encodeURIComponent(
+          datasetId
+        )}/items?clean=true&format=json&token=${encodeURIComponent(token)}`,
+        { cache: "no-store" }
+      );
+
+      const rawItems = await itemsRes.json();
+
+      // Normalize based on source
+      const normalized =
+        source === "google-maps"
+          ? normalizeGoogleMaps(rawItems, { minRating, days })
+          : normalizeGeneric(rawItems, source);
+
+      return NextResponse.json({
+        status: "SUCCEEDED",
+        runId,
+        items: normalized,
+      });
+    } catch (e: any) {
+      return jsonError("Polling Apify run failed", 500, { message: e?.message });
+    }
+  }
+
+  // --- 2) START A NEW RUN (return immediately with runId) ---
   try {
-    const token = process.env.APIFY_TOKEN;
-    if (!token) return json({ items: [], error: "Missing APIFY_TOKEN" }, 500);
-
-    const { searchParams } = new URL(req.url);
-    const source = (searchParams.get("source") || "").trim();
-    const q = (searchParams.get("q") || "").trim();
-
-    if (!source) return json({ items: [], error: "Missing source" }, 400);
-    if (!q) return json({ items: [], error: "Missing q" }, 400);
-
-    // ✅ Implemented: Google Maps places (business listing)
     if (source === "google-maps") {
-      // Minimal input for compass/crawler-google-places
-      // Keep it cheap and fast:
-      const input = {
+      // Use Google Maps Scraper actor that supports reviews well
+      // Actor: apify/google-maps-scraper
+      const actorId = "apify/google-maps-scraper";
+
+      const input: any = {
         searchStringsArray: [q],
-        locationQuery: "Ireland",
-        maxCrawledPlacesPerSearch: 10,
-        // You can add:
-        // language: "en",
-        // maxReviews: 10,
+        // Keep it tight so it doesn't crawl 196 pages:
+        maxCrawledPlacesPerSearch: maxPlaces,
+        language: "en",
+        // Reviews:
+        scrapeReviews: true,
+        maxReviews: maxReviews,
+        // Keep costs/volume sane:
+        includeImages: false,
+        includeWebResults: false,
       };
 
-      const rawItems = await runApifyActorAndGetItems({
-        token,
-        actorId: ACTOR_GOOGLE_MAPS,
-        input,
-        waitSeconds: 30,
-        pollSeconds: 90,
+      const startRes = await fetch(
+        `https://api.apify.com/v2/acts/${encodeURIComponent(
+          actorId
+        )}/runs?token=${encodeURIComponent(token)}&waitForFinish=0`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        }
+      );
+
+      const startJson = await startRes.json();
+      const newRunId = startJson?.data?.id;
+
+      if (!newRunId) return jsonError("Could not start Apify run", 500, startJson);
+
+      return NextResponse.json({
+        status: "RUNNING",
+        runId: newRunId,
+        message: "Started Apify run. Polling required.",
       });
-
-      const normalized: NormalizedItem[] = rawItems.map(normalizeGooglePlace);
-
-      return json({ items: normalized });
     }
 
-    // ✅ Not wired yet (but stable)
-    const notWired: NormalizedItem[] = [
-      {
-        title: `Source "${source}" not wired yet`,
-        type: "info",
-        source,
-        snippet:
-          "The UI is working. Next step is connecting this source to an Apify actor and mapping fields into the standard format.",
-        url: "",
-        rating: null,
-        date: null,
-      },
-    ];
-
-    return json({ items: notWired });
+    // Other sources can be wired later to their actors.
+    // For now return a stable response (no crashes).
+    return NextResponse.json({
+      status: "SUCCEEDED",
+      runId: null,
+      items: [],
+      note: `Source "${source}" not wired to an actor yet. Google (business + reviews) is live.`,
+    });
   } catch (e: any) {
-    // Always return JSON
-    return json(
-      {
-        items: [],
-        error: e?.message || "Apify request failed",
-        details: e?.stack ? String(e.stack).slice(0, 1000) : undefined,
-      },
-      500
-    );
+    return jsonError("Apify request failed", 500, { message: e?.message });
   }
+}
+
+function normalizeGeneric(raw: any[], source: string) {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 50).map((x: any, i: number) => ({
+    id: `${source}-${i}`,
+    title: x?.title || x?.name || x?.heading || "Item",
+    type: x?.type || "item",
+    source,
+    snippet: x?.snippet || x?.text || x?.description || "",
+    url: x?.url || x?.link || "",
+    date: x?.date || null,
+    rating: x?.rating || null,
+  }));
+}
+
+/**
+ * For Google Maps Scraper output:
+ * It usually returns place objects (title/name, address, url, totalScore)
+ * and may include a "reviews" array if scrapeReviews=true.
+ */
+function normalizeGoogleMaps(
+  raw: any[],
+  opts: { minRating: number; days: number }
+) {
+  if (!Array.isArray(raw)) return [];
+
+  const out: any[] = [];
+  let idx = 0;
+
+  for (const place of raw) {
+    const placeTitle = place?.title || place?.name || "Google place";
+    const placeUrl = place?.url || place?.placeUrl || place?.googleUrl || "";
+    const placeRating = place?.totalScore ?? place?.rating ?? null;
+
+    const reviews = Array.isArray(place?.reviews) ? place.reviews : [];
+
+    if (reviews.length) {
+      for (const r of reviews) {
+        const stars = r?.stars ?? r?.rating ?? null;
+        const dt = pickReviewDate(r);
+
+        if (opts.minRating && stars != null && Number(stars) < opts.minRating) continue;
+        if (!withinDays(dt, opts.days)) continue;
+
+        out.push({
+          id: `google-review-${idx++}`,
+          title: placeTitle,
+          type: "review",
+          source: "google",
+          snippet: r?.text || r?.reviewText || r?.comment || "",
+          url: placeUrl,
+          date: dt,
+          rating: stars,
+        });
+      }
+    } else {
+      // Still show the place as a fallback row
+      out.push({
+        id: `google-place-${idx++}`,
+        title: placeTitle,
+        type: "business",
+        source: "google",
+        snippet: place?.address || place?.fullAddress || "",
+        url: placeUrl,
+        date: null,
+        rating: placeRating,
+      });
+    }
+  }
+
+  return out.slice(0, 200);
 }
