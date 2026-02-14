@@ -17,19 +17,23 @@ export default function Home() {
     setItems([]);
 
     try {
-      const res = await fetch(`/api/run?source=${encodeURIComponent(source)}&q=${encodeURIComponent(query)}`);
-      const json = await res.json();
+  const res = await fetch(`/api/run?source=${encodeURIComponent(source)}&q=${encodeURIComponent(query)}`);
 
-      if (!res.ok) throw new Error(json?.error || "Something went wrong");
+  const contentType = res.headers.get("content-type") || "";
 
-      // We’ll standardise to { items: [...] } in every endpoint
-      setItems(json.items || []);
-    } catch (e: any) {
-      setError(e.message || "Failed");
-    } finally {
-      setLoading(false);
-    }
+  let json;
+
+  if (contentType.includes("application/json")) {
+    json = await res.json();
+  } else {
+    const text = await res.text();
+    throw new Error(text.slice(0, 200));
   }
+
+  if (!res.ok) throw new Error(json?.error || "Something went wrong");
+
+  setItems(json.items || []);
+}
 
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
